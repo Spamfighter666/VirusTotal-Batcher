@@ -1,0 +1,4 @@
+arrow>=1.4,<2
+dnspython>=2.8,<3
+tldextract>=5.3,<6
+tqdm>=4.67,<5
