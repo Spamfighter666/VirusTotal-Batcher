@@ -1,0 +1,71 @@
+name: VirusTotal live smoke test
+on:
+  push:
+    branches: [verify-vt-live-20261105]
+permissions:
+  contents: read
+jobs:
+  live:
+    if: github.event.created && github.repository == 'Spamfighter666/VirusTotal-Batcher'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f01c69d815067943a7e473fba91c16ab5c2a0956
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Fetch one existing URL report and verify CSV output
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+
+          if not os.environ.get("VT_API_KEY", "").strip():
+              sys.exit("The VT_API_KEY repository secret is unavailable.")
+
+          target = "https://www.google.com/"
+          with tempfile.TemporaryDirectory() as temp_dir:
+              directory = Path(temp_dir)
+              source = directory / "url.txt"
+              source.write_text(target + "\n", encoding="utf-8")
+              result = subprocess.run(
+                  [sys.executable, "vtmachinegun.py", "--mode", "url", "--input",
+                   str(source), "--output-dir", str(directory), "--request-budget", "1"],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  timeout=45,
+              )
+              if result.returncode:
+                  failure = next(directory.glob("VT-URL-Lookup-Failures-*.csv"), None)
+                  if failure is not None:
+                      with failure.open(encoding="utf-8", newline="") as stream:
+                          reason = next(csv.DictReader(stream), {}).get("Reason", "")
+                      for status in ("401", "403", "404", "429"):
+                          if "HTTP " + status in reason:
+                              sys.exit("VirusTotal lookup failed with HTTP " + status + ".")
+                      if reason == "Configured per-run request budget reached":
+                          sys.exit("The single allowed request failed with a retryable error.")
+                  sys.exit("The batcher failed to fetch the existing URL report.")
+
+              report = next(directory.glob("VT-URL-Lookup-Results-*.csv"), None)
+              if report is None:
+                  sys.exit("The batcher did not produce the results CSV.")
+              with report.open(encoding="utf-8", newline="") as stream:
+                  rows = list(csv.DictReader(stream))
+              if (len(rows) != 1 or rows[0].get("URL") != target
+                      or not rows[0].get("Score", "").isdigit()
+                      or not rows[0].get("Scan Date")):
+                  sys.exit("The results CSV did not contain the expected URL report.")
+          print("PASS: One authenticated VirusTotal v3 URL lookup returned an existing report and produced one valid CSV row.")
+          PY
